@@ -1,0 +1,11 @@
+You are a procurement audit expert. Analyze the following tender document chunk.
+[Filename]: {filename}
+[Chunk Type]: {chunk_type}
+[Content]:
+{content}
+
+Extract the following (use "None" if absent):
+1) Key data: prices, durations, technical parameters
+2) Anomalies: unusually similar wording, hidden contacts, abnormal addresses
+3) Legal risks: missing declarations, improper seals, inconsistent dates
+4) Clues: shared contacts / phones / emails / IPs / template patterns

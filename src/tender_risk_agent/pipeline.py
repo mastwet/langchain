@@ -7,14 +7,16 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from .chunk_analysis import ChunkAnalyzer
+from .document_assembly import DocumentAssembler
+from .image_recognition import IMAGE_PATTERN, ImageRecognizer
 from .models import ChunkType, CrossSupplierFinding, DocumentChunk, EvidenceItem, SupplierRiskProfile
-from .prompts import AGENT_PROMPT, EXPERTS, SINGLE_CHUNK_PROMPT
+from .prompts import AGENT_PROMPT, EXPERTS
+from .text_chunking import TextChunker
 
-IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 PHONE_PATTERN = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 ACCOUNT_PATTERN = re.compile(r"\b\d{12,19}\b")
-HEADING_SPLIT = re.compile(r"(?=^#{1,4}\s)", re.MULTILINE)
 
 MANDATORY_DECLARATIONS = ["中小企业声明函", "无重大违法记录声明", "授权委托书", "无围标串标声明"]
 
@@ -22,11 +24,31 @@ MANDATORY_DECLARATIONS = ["中小企业声明函", "无重大违法记录声明"
 class TenderRiskPipeline:
     """采购文件围串标识别主流程。"""
 
-    def __init__(self, llm: Any, vision_tool: Any | None = None, chunk_size: int = 1000, chunk_overlap: int = 200) -> None:
+    def __init__(
+        self,
+        llm: Any,
+        vision_tool: Any | None = None,
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        image_recognizer: ImageRecognizer | None = None,
+        chunk_analyzer: ChunkAnalyzer | None = None,
+        document_assembler: DocumentAssembler | None = None,
+        supervisor_graph: Any | None = None,
+    ) -> None:
         self.llm = llm
         self.vision_tool = vision_tool
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        if image_recognizer:
+            self.image_recognizer = image_recognizer
+        elif vision_tool:
+            self.image_recognizer = ImageRecognizer(vision_tool)
+        else:
+            self.image_recognizer = None
+        self.chunker = TextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self.chunk_analyzer = chunk_analyzer or ChunkAnalyzer(
+            llm=self.llm, image_recognizer=self.image_recognizer
+        )
+        self.document_assembler = document_assembler
+        self.supervisor_graph = supervisor_graph
 
     def load_markdown_docs(self, docs_dir: str | Path) -> dict[str, list[Path]]:
         docs_path = Path(docs_dir)
@@ -37,25 +59,11 @@ class TenderRiskPipeline:
             grouped[path.parent.name].append(path)
         return grouped
 
-    def _split_text(self, content: str) -> list[str]:
-        sections = [s.strip() for s in HEADING_SPLIT.split(content) if s.strip()]
-        chunks: list[str] = []
-        for sec in sections:
-            if len(sec) <= self.chunk_size:
-                chunks.append(sec)
-                continue
-            start = 0
-            while start < len(sec):
-                end = min(start + self.chunk_size, len(sec))
-                chunks.append(sec[start:end])
-                if end == len(sec):
-                    break
-                start = max(0, end - self.chunk_overlap)
-        return chunks or [content]
-
     def split_and_classify(self, supplier: str, file_path: Path) -> list[DocumentChunk]:
         content = file_path.read_text(encoding="utf-8")
-        chunks = self._split_text(content)
+        chunks = self.chunker.split(content)
+        if self.document_assembler:
+            self.document_assembler.record_and_save(file_path, content, chunks)
         return [
             DocumentChunk(
                 supplier=supplier,
@@ -69,18 +77,25 @@ class TenderRiskPipeline:
         ]
 
     def analyze_chunk(self, chunk: DocumentChunk) -> dict[str, Any]:
-        image_notes: list[str] = []
-        if chunk.has_image and self.vision_tool:
-            for img_ref in IMAGE_PATTERN.findall(chunk.content):
-                image_notes.append(str(self.vision_tool.invoke({"image_path": img_ref})))
+        result = self.chunk_analyzer.analyze(chunk)
+        return {"raw": result.raw, "image_notes": result.image_notes}
 
-        prompt = SINGLE_CHUNK_PROMPT.format(
-            filename=chunk.source_file,
-            chunk_type=chunk.chunk_type.value,
-            content=chunk.content + ("\n\n图片解析：" + "\n".join(image_notes) if image_notes else ""),
-        )
-        raw = str(self.llm.invoke(prompt).content)
-        return {"raw": raw, "image_notes": image_notes}
+    def run_supervisor_team(self, supplier: str, evidence_text: str) -> str | None:
+        if not self.supervisor_graph:
+            return None
+        state = {
+            "messages": [f"Supplier: {supplier}\nEvidence:\n{evidence_text}"],
+            "next": "",
+        }
+        result = self.supervisor_graph.invoke(state)
+        messages = result.get("messages", [])
+        if not messages:
+            return None
+        last = messages[-1]
+        if hasattr(last, "content"):
+            return str(last.content)
+        return str(last)
+
 
     def run_expert_panel(self, supplier: str, evidence_text: str, source_refs: list[str]) -> list[EvidenceItem]:
         items: list[EvidenceItem] = []
@@ -127,6 +142,9 @@ class TenderRiskPipeline:
                     analysis = self.analyze_chunk(chunk)
                     evidence_pool.append(analysis["raw"])
 
+            supervisor_summary = self.run_supervisor_team(supplier, "\n".join(evidence_pool))
+            if supervisor_summary:
+                evidence_pool.append(supervisor_summary)
             profile.evidence.extend(self.run_expert_panel(supplier, "\n".join(evidence_pool), source_refs))
             self._append_mandatory_declaration_checks(profile, all_text="\n".join(evidence_pool), source_refs=source_refs)
             profiles.append(profile)

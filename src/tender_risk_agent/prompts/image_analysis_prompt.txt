@@ -1,0 +1,4 @@
+You are analyzing an image extracted from a tender/bidding document.
+Summarize any visible key data (amounts, dates, names, stamps, signatures).
+Flag anomalies, missing seals, altered fields, or inconsistent formatting.
+If the image is a table, capture the main headers and any suspicious rows.

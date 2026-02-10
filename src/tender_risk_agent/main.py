@@ -5,21 +5,38 @@ from pathlib import Path
 
 from langchain_openai import ChatOpenAI
 
+from .doc_conversion import convert_docs_in_dir
 from .pipeline import TenderRiskPipeline
 from .reporting import build_context, build_final_report, render_markdown
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="采购文件围串标行为智能识别系统")
-    parser.add_argument("--docs-dir", default="docs", help="投标文件 markdown 目录")
-    parser.add_argument("--project-name", default="未命名项目", help="采购项目名称")
-    parser.add_argument("--output-dir", default="outputs", help="报告输出目录")
-    parser.add_argument("--model", default="gpt-4o-mini", help="LLM 模型名")
+    parser = argparse.ArgumentParser(
+        description="Tender document collusion risk recognition system"
+    )
+    parser.add_argument(
+        "--convert-docs-from",
+        default=None,
+        help="Directory with .doc/.docx/.rtf/.odt to convert before processing",
+    )
+    parser.add_argument(
+        "--convert-docs-to",
+        default=None,
+        help="Output directory for converted markdown (defaults to --docs-dir)",
+    )
+    parser.add_argument("--docs-dir", default="docs", help="Markdown docs directory")
+    parser.add_argument("--project-name", default="Unnamed project", help="Project name")
+    parser.add_argument("--output-dir", default="outputs", help="Report output directory")
+    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model name")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.convert_docs_from:
+        output_dir = Path(args.convert_docs_to or args.docs_dir)
+        convert_docs_in_dir(Path(args.convert_docs_from), output_dir)
+
     llm = ChatOpenAI(model=args.model, temperature=0)
     pipeline = TenderRiskPipeline(llm=llm, vision_tool=None)
 
